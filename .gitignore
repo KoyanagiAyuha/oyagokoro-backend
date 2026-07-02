@@ -3,6 +3,11 @@
 .env.local
 .env.*.local
 
+# Firebase Admin SDK サービスアカウント秘密鍵（絶対にコミット禁止）
+*-firebase-adminsdk-*.json
+firebase-service-account*.json
+serviceAccountKey*.json
+
 # Python
 __pycache__/
 *.pyc

@@ -13,6 +13,6 @@ async def health_check(session: AsyncSession = Depends(get_session)) -> dict[str
     try:
         await session.execute(text("SELECT 1"))
         db_status = "ok"
-    except Exception as e:  # noqa: BLE001
-        db_status = f"error: {e}"
+    except Exception:  # noqa: BLE001
+        db_status = "error"
     return {"status": "ok", "db": db_status}

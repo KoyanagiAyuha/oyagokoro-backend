@@ -7,7 +7,7 @@
 - Python 3.12 / FastAPI / uv 管理
 - PostgreSQL 16（ローカルは Docker / 本番は Neon Serverless Postgres）
 - SQLAlchemy 2.x (async) + Alembic
-- Firebase Auth / Stripe / Resend / AWS S3 連携（実装は順次）
+- Firebase Auth / App内課金(IAP: Apple/Google) / Resend / AWS S3 連携（実装は順次）
 
 ## 必要なもの
 
@@ -112,15 +112,21 @@ oyagokoro-backend/
 
 ## 関連ドキュメント
 
-- データモデル設計: `../oyagokoro/docs/data-model.md`
-- 仕様書: `../oyagokoro/specs/oyagokoro-spec.md`
-- DDL（参考）: `../oyagokoro/db/schema.sql`
+本リポジトリは自己完結しており、外部リポジトリへの参照は不要。詳細は `docs/README.md`（ドキュメント索引）を参照。
+
+- 製品仕様: `docs/product-spec.md`
+- データモデル設計: `docs/data-model.md`
+- API エンドポイント仕様: `docs/api-spec.md`
+- API 連携規約: `docs/api-conventions.md`
+- 外部サービス設定: `docs/owner-setup-guide.md`
+- DDL（実体）: テーブル定義のスキーマは `alembic/versions/` のマイグレーションが真実の源
 
 ## API 規約
 
 - ベースパス: `/api/v1/`
 - コンテントタイプ: `application/json`
 - 認証ヘッダー: `Authorization: Bearer <Firebase ID Token>`
+- 詳細: `docs/api-conventions.md`
 
 ## トラブルシューティング
 

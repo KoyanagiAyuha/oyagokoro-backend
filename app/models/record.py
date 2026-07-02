@@ -9,7 +9,8 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import CheckConstraint, Computed, ForeignKey, Text, text
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -35,21 +36,18 @@ class Record(Base):
     )
     body: Mapped[str] = mapped_column(Text, nullable=False)
     visibility: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'all'"))
-    posted_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
-    )
+    posted_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
     # GENERATED ALWAYS AS (投稿日翌日 0:00 JST 起算で 7 日間) STORED
+    # v0.4: Computed 式を timezone() 関数形式に変更（AT TIME ZONE 演算子形式から）
     window_ends_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         Computed(
-            "(date_trunc('day', posted_at AT TIME ZONE 'Asia/Tokyo') + INTERVAL '8 days') AT TIME ZONE 'Asia/Tokyo'",
+            "timezone('Asia/Tokyo', date_trunc('day', timezone('Asia/Tokyo', posted_at)) + INTERVAL '8 days')",
             persisted=True,
         ),
         nullable=False,
     )
-    created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
-    )
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
 
     __table_args__ = (
         CheckConstraint(
