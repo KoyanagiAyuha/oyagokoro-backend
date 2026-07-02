@@ -8,7 +8,8 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, text
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -39,12 +40,8 @@ class DeliveryAddress(Base):
     last_bounced_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     bounce_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     paused_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
-    )
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
 
     __table_args__ = (
         CheckConstraint(

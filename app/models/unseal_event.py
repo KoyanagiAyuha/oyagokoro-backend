@@ -8,7 +8,8 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import CheckConstraint, ForeignKey, String, text
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -38,9 +39,7 @@ class UnsealEvent(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
     notification_sent_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
-    )
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
 
     __table_args__ = (
         CheckConstraint(

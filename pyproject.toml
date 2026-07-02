@@ -31,6 +31,21 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI の依存性注入は引数デフォルトで Depends()/Query()/Path() 等を呼ぶのが正しい書き方。
+# B008（引数デフォルトでの関数呼び出し禁止）の対象から除外する。
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
+]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

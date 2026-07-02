@@ -7,7 +7,8 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import CheckConstraint, ForeignKey, String, text
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -30,12 +31,8 @@ class Capsule(Base):
         ForeignKey("users.id", ondelete="RESTRICT", name="capsules_created_by_fkey"),
         nullable=False,
     )
-    created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
-    )
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
 
     __table_args__ = (
         CheckConstraint(

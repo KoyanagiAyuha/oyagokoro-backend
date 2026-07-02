@@ -8,7 +8,8 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Integer, UniqueConstraint, text
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -32,9 +33,7 @@ class StorageUsage(Base):
     last_calculated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")
-    )
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
 
     __table_args__ = (
         UniqueConstraint("capsule_id", name="storage_usage_capsule_id_unique"),
