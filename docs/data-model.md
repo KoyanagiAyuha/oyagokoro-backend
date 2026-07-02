@@ -1,6 +1,6 @@
 # おやごころ MVP データモデル設計書
 
-> Neon PostgreSQL（PostgreSQL 16互換）/ 2026-07-02 / IAP反映版
+> Neon PostgreSQL（PostgreSQL 16互換）/ 2026-07-03 / v1.2（IAP反映・仕様の穴3件追記・export_jobs 新設で12テーブル）
 
 ---
 
@@ -8,7 +8,7 @@
 
 ### テーブル構成
 
-本MVPは **11テーブル** で構成される。
+本MVPは **12テーブル** で構成される。
 
 | # | テーブル名 | 役割区分 |
 |---|-----------|---------|
@@ -23,6 +23,7 @@
 | 9 | `storage_usage` | ストレージ使用量スナップショット |
 | 10 | `unseal_events` | 開封イベントログ |
 | 11 | `email_deliveries` | メール配信ログ |
+| 12 | `export_jobs` | エクスポートジョブ状態（2026-07-03 追記） |
 
 ### 設計原則（共通指針）
 
@@ -83,6 +84,8 @@ erDiagram
         VARCHAR invited_email
         VARCHAR status
         TIMESTAMPTZ invited_at
+        TEXT invite_token_hash
+        TIMESTAMPTZ invite_token_expires_at
         TIMESTAMPTZ joined_at
         TIMESTAMPTZ deleted_at
         VARCHAR deletion_reason
@@ -205,6 +208,20 @@ erDiagram
         TIMESTAMPTZ updated_at
     }
 
+    export_jobs {
+        UUID id PK
+        UUID capsule_id FK
+        UUID requested_by FK
+        TEXT status
+        TEXT scope
+        TEXT_ARRAY formats
+        JSONB object_keys
+        TEXT error_message
+        TIMESTAMPTZ requested_at
+        TIMESTAMPTZ completed_at
+        TIMESTAMPTZ expires_at
+    }
+
     users ||--o{ capsules : "created_by（創設者）"
     users ||--o{ capsule_members : "user_id（参加）"
     users ||--o{ records : "author_id（投稿）"
@@ -212,6 +229,7 @@ erDiagram
     users ||--o| subscriptions : "user_id（0 or 1）"
     users ||--o{ storage_purchases : "user_id（購入）"
     users ||--o{ unseal_events : "executes（開封実行者）"
+    users ||--o{ export_jobs : "requested_by（エクスポート要求者）"
 
     capsules ||--o{ capsule_members : "capsule_id（参加関係）"
     capsules ||--o{ records : "capsule_id（記録）"
@@ -219,6 +237,7 @@ erDiagram
     capsules ||--o{ storage_usage : "capsule_id（使用量）"
     capsules ||--o{ unseal_events : "capsule_id（開封）"
     capsules ||--o{ email_deliveries : "capsule_id（配信ログ）"
+    capsules ||--o{ export_jobs : "capsule_id（エクスポート対象）"
 
     records ||--o{ record_attachments : "record_id（添付）"
     records ||--o{ email_deliveries : "record_id（配信ログ）"
@@ -227,6 +246,8 @@ erDiagram
 
     unseal_events ||--o{ email_deliveries : "unseal_event_id（配信紐付け）"
 ```
+
+> `export_jobs.formats` は Mermaid の型表記制約上 `TEXT_ARRAY` と表記しているが、実 DDL は `TEXT[]` を用いる（§3.12）。
 
 ---
 
@@ -245,6 +266,7 @@ erDiagram
 | `storage_usage` | カプセル単位のストレージ使用量スナップショット（即時更新） | `id` (UUID) | `capsule_id → capsules.id` |
 | `unseal_events` | タイムカプセル開封イベントの記録（INSERT only・不可逆） | `id` (UUID) | `capsule_id → capsules.id`, `executed_by → users(id) ON DELETE SET NULL` |
 | `email_deliveries` | メール配信ログ（通知・記録配信・リトライ管理） | `id` (UUID) | `capsule_id → capsules.id`, `record_id → records.id`, `delivery_address_id → delivery_addresses.id`, `unseal_event_id → unseal_events.id` |
+| `export_jobs` | 非同期データエクスポート（api-spec §6.4/§6.5）のジョブ状態永続化。要求者・生成物 S3 キー・失敗理由・有効期限を管理（2026-07-03 追記） | `id` (UUID) | `capsule_id → capsules.id`, `requested_by → users.id` |
 
 ---
 
@@ -359,6 +381,8 @@ CREATE INDEX idx_capsules_open_at_unsealed
 | `invited_email` | `VARCHAR(320)` | NOT NULL | — | 招待先メールアドレス（参加後も保持） |
 | `status` | `VARCHAR(20)` | NOT NULL | `'invited'` | 参加状態（'invited' / 'active' / 'deleted'） |
 | `invited_at` | `TIMESTAMPTZ` | NOT NULL | `now()` | 招待送信日時 |
+| `invite_token_hash` | `TEXT` | NULL | `NULL` | 招待受諾用の不透明トークンの SHA-256 等ハッシュ値。生トークンはDBに保存しない（招待作成時に一度だけ生成し、招待メール本文・招待作成APIレスポンスでのみ提示）。`status='invited'` の行でのみ非NULL、`'active'`/`'deleted'` への遷移時に `NULL` へクリアする（2026-07-03 追記） |
+| `invite_token_expires_at` | `TIMESTAMPTZ` | NULL | `NULL` | 招待トークンの有効期限。`status='invited'` の行でのみ非NULL、`'active'`/`'deleted'` への遷移時に `NULL` へクリアする（2026-07-03 追記） |
 | `joined_at` | `TIMESTAMPTZ` | NULL | `NULL` | 招待承諾・参加完了日時（アクティブ転換時に記録） |
 | `deleted_at` | `TIMESTAMPTZ` | NULL | `NULL` | 削除日時（退出 or 他参加者による削除） |
 | `deletion_reason` | `VARCHAR(50)` | NULL | `NULL` | 削除区分: `'self_exit'`（自己退出）/ `'removed_by_member'`（他参加者による削除） |
@@ -372,6 +396,13 @@ CREATE INDEX idx_capsules_open_at_unsealed
 | `'invited'` | 招待送信済み・未承諾 | 初期値 |
 | `'active'` | アクティブ参加者。全機能利用可 | 招待リンクから参加完了時（`joined_at` も記録） |
 | `'deleted'` | 削除済み。アクセス不可。記録は「元参加者」表記で保持 | 自己退出 or 他参加者による削除 |
+
+#### 招待トークンの運用（2026-07-03 追記）
+
+- 招待作成時（`POST /capsules/{capsuleId}/members`、api-spec §4.2）に、サーバーが不透明な生トークン（十分なエントロピーを持つランダム文字列）を一度だけ生成する。生トークンは招待作成APIのレスポンスと招待メール本文の受諾リンクにのみ含め、DBには保存しない
+- DBには生トークンの SHA-256 等によるハッシュ値のみを `invite_token_hash` に保存する。招待受諾API（`POST /invitations/{token}/accept`、api-spec §4.4）は受け取った `token` をハッシュ化し、`invite_token_hash` と突合して照合する
+- `invite_token_expires_at` で有効期限を管理する。期限切れ・ハッシュ不一致のいずれも `404 ERR_INVITATION_NOT_FOUND`（存在秘匿。api-spec §4.4）として扱う
+- 受諾成功（`status='active'` への遷移）または参加者削除（`status='deleted'` への遷移）の際、`invite_token_hash` / `invite_token_expires_at` は共に `NULL` にクリアする（`chk_capsule_members_invite_token_status` で強制。下記CHECK制約参照）
 
 #### インデックス
 
@@ -389,6 +420,11 @@ CREATE UNIQUE INDEX idx_capsule_members_capsule_email
 CREATE INDEX idx_capsule_members_active
     ON capsule_members (capsule_id, status)
     WHERE status = 'active';
+-- 招待受諾時のトークン照合（POST /invitations/{token}/accept）（2026-07-03 追記）
+-- 生トークンはDBに保存しないため、受諾APIはリクエストのtokenをハッシュ化してこの索引で照合する
+CREATE INDEX idx_capsule_members_invite_token_hash
+    ON capsule_members (invite_token_hash)
+    WHERE invite_token_hash IS NOT NULL;
 ```
 
 #### CHECK 制約
@@ -397,6 +433,14 @@ CREATE INDEX idx_capsule_members_active
 - `deletion_reason IN ('self_exit', 'removed_by_member')`
 - `(status = 'deleted' AND deleted_at IS NOT NULL AND deletion_reason IS NOT NULL) OR (status != 'deleted' AND deleted_at IS NULL AND deletion_reason IS NULL)`
 - `(status = 'active' AND joined_at IS NOT NULL) OR (status != 'active')`
+- `chk_capsule_members_invite_token_status`（2026-07-03 追記）: `status != 'invited'` の行は招待トークンを保持しない（受諾・削除確定後はトークンをクリアする）:
+  ```sql
+  (status = 'invited') OR (invite_token_hash IS NULL AND invite_token_expires_at IS NULL)
+  ```
+- `chk_capsule_members_invite_token_pair`（2026-07-03 追記）: `invite_token_hash` と `invite_token_expires_at` は両方 NULL か両方非NULLのいずれか（片方だけの設定を禁止）:
+  ```sql
+  (invite_token_hash IS NULL) = (invite_token_expires_at IS NULL)
+  ```
 
 #### 外部キー
 
@@ -800,7 +844,7 @@ CREATE INDEX idx_unseal_events_notification_pending
 
 ### 3.11 email_deliveries
 
-**責務**: メール配信ログ（開封通知・記録配信・招待・バウンス警告の4タイプ）。リトライ管理（最大3回・24時間以内）と visibility フィルタ証跡の保持を担う。
+**責務**: メール配信ログ（開封通知・記録配信・招待・バウンス警告・開封日変更通知・トライアル終了リマインダーの6タイプ）。リトライ管理（最大3回・24時間以内）と visibility フィルタ証跡の保持を担う。
 
 #### カラム定義
 
@@ -810,8 +854,8 @@ CREATE INDEX idx_unseal_events_notification_pending
 | `capsule_id` | `UUID` | NOT NULL | — | 外部キー: capsules(id) ON DELETE CASCADE |
 | `record_id` | `UUID` | NULL | — | 外部キー: records(id) ON DELETE RESTRICT。記録配信時に入力。開封通知は NULL |
 | `delivery_address_id` | `UUID` | NOT NULL | — | 外部キー: delivery_addresses(id) ON DELETE RESTRICT |
-| `unseal_event_id` | `UUID` | NULL 許容（email_type 条件付き） | — | 外部キー: unseal_events(id) ON DELETE RESTRICT。`unseal_notice` / `record_delivery` 時のみ必須、`invite` / `bounce_warning` / `open_at_change` 時は NULL（CHECK 制約で整合性強制） |
-| `email_type` | `VARCHAR(50)` | NOT NULL | — | `'unseal_notice'` / `'record_delivery'` / `'invite'` / `'bounce_warning'` / `'open_at_change'`（開封日変更通知） |
+| `unseal_event_id` | `UUID` | NULL 許容（email_type 条件付き） | — | 外部キー: unseal_events(id) ON DELETE RESTRICT。`unseal_notice` / `record_delivery` 時のみ必須、`invite` / `bounce_warning` / `open_at_change` / `trial_reminder` 時は NULL（CHECK 制約で整合性強制。`trial_reminder` は開封イベントと無関係のため不要。2026-07-03 追記） |
+| `email_type` | `VARCHAR(50)` | NOT NULL | — | `'unseal_notice'` / `'record_delivery'` / `'invite'` / `'bounce_warning'` / `'open_at_change'`（開封日変更通知） / `'trial_reminder'`（トライアル終了3日前/1日前リマインダー。product-spec.md §6.5。2026-07-03 追記） |
 | `resend_message_id` | `VARCHAR(255)` | NULL | — | Resend API からの返却 message_id |
 | `status` | `VARCHAR(20)` | NOT NULL | `'pending'` | `'pending'` / `'sent'` / `'delivered'` / `'bounced'` / `'failed'` / `'skipped'` |
 | `attempt_count` | `SMALLINT` | NOT NULL | `1` | 送信試行回数（1-3） |
@@ -843,10 +887,10 @@ CREATE INDEX idx_email_deliveries_record_id
 
 #### CHECK 制約
 
-- `email_type IN ('unseal_notice', 'record_delivery', 'invite', 'bounce_warning', 'open_at_change')`
+- `email_type IN ('unseal_notice', 'record_delivery', 'invite', 'bounce_warning', 'open_at_change', 'trial_reminder')`（2026-07-03 追記: `trial_reminder` を追加）
 - `status IN ('pending', 'sent', 'delivered', 'bounced', 'failed', 'skipped')`
 - `attempt_count BETWEEN 1 AND 3`
-- `chk_email_deliveries_unseal_event_consistency`: `email_type` と `unseal_event_id` の整合性を強制する。`unseal_notice` / `record_delivery` は開封イベント由来のため `unseal_event_id IS NOT NULL` を要求し、`invite` / `bounce_warning` / `open_at_change` は開封イベントと無関係のため `unseal_event_id IS NULL` を要求する。これにより `unseal_event_id` を NULL 許容にしながら、必要な型のメールについては必ず紐付けが保証される
+- `chk_email_deliveries_unseal_event_consistency`: `email_type` と `unseal_event_id` の整合性を強制する。`unseal_notice` / `record_delivery` は開封イベント由来のため `unseal_event_id IS NOT NULL` を要求し、`invite` / `bounce_warning` / `open_at_change` / `trial_reminder` は開封イベントと無関係のため `unseal_event_id IS NULL` を要求する（`trial_reminder` は `subscriptions.trial_end` 起点のバッチ由来であり `unseal_events` を必要としない。2026-07-03 追記）。これにより `unseal_event_id` を NULL 許容にしながら、必要な型のメールについては必ず紐付けが保証される
 
 #### 外部キー
 
@@ -854,6 +898,81 @@ CREATE INDEX idx_email_deliveries_record_id
 - `record_id → records(id) ON DELETE RESTRICT`（records は INSERT only で物理削除不可。将来 records を削除可能にした場合の配信ログ自動消失を防ぐため CASCADE を使用しない）
 - `delivery_address_id → delivery_addresses(id) ON DELETE RESTRICT`（監査担保のため削除不可）
 - `unseal_event_id → unseal_events(id) ON DELETE RESTRICT`（不可逆性）
+
+---
+
+### 3.12 export_jobs（2026-07-03 追記）
+
+**責務**: 非同期データエクスポート（api-spec.md §6.4 `POST /capsules/{id}/export` → `202` 受理、§6.5 `GET /capsules/{id}/export/{jobId}` でのポーリング）のジョブ状態を永続化する。サーバー/ワーカーの再起動をまたいでもジョブの受理・進行状況・生成物の所在・失敗理由が失われないことを担保する（着手前論点 §12-9 の決定）。
+
+#### カラム定義
+
+| カラム名 | 型 | NULL | デフォルト | 説明 |
+|---------|-----|------|---------|------|
+| `id` | `UUID` | NOT NULL | `gen_random_uuid()` | 内部主キー。api-spec.md §6.4/§6.5 の `export_job_id` に対応 |
+| `capsule_id` | `UUID` | NOT NULL | — | エクスポート対象カプセル（`capsules.id` への FK） |
+| `requested_by` | `UUID` | NOT NULL | — | 要求者（`users.id` への FK）。§6.5 の「要求者本人のみ閲覧可」認可はこのカラムで判定する |
+| `status` | `TEXT` | NOT NULL | `'queued'` | ジョブ状態。`'queued'` / `'processing'` / `'completed'` / `'failed'`（api-spec.md §6.5 の状態語彙と一致） |
+| `scope` | `TEXT` | NOT NULL | — | エクスポート範囲。`'sealed_self_only'`（封印中・自分の記録のみ）/ `'unsealed_all'`（開封後・全記録）。リクエスト受理時点のカプセル状態から確定し、生成完了まで不変（api-spec.md §6.4） |
+| `formats` | `TEXT[]` | NOT NULL | — | 要求された生成形式の配列。各要素は `'pdf'` / `'json'` / `'markdown'`（api-spec.md §6.4 の `formats` リクエストボディをそのまま保持） |
+| `object_keys` | `JSONB` | NULL | `NULL` | 完成物の S3 オブジェクトキーを `{"pdf": "...", "json": "...", "markdown": "..."}` 形式で保持。`status='completed'` になった時点で `formats` の全要素分を設定する |
+| `error_message` | `TEXT` | NULL | `NULL` | `status='failed'` 時のエラー詳細 |
+| `requested_at` | `TIMESTAMPTZ` | NOT NULL | `now()` | ジョブ受理日時（`202` レスポンスの `requested_at` に対応） |
+| `completed_at` | `TIMESTAMPTZ` | NULL | `NULL` | 生成完了日時（`status IN ('completed','failed')` になった時刻） |
+| `expires_at` | `TIMESTAMPTZ` | NULL | `NULL` | 生成物ダウンロード URL（S3 presigned GET）の失効日時。`status='completed'` になった時点で設定する |
+
+#### 1 ジョブ = 複数フォーマットという設計（`format` 単一列を採らなかった根拠）
+
+api-spec.md §6.4 のリクエストボディ `formats` は配列であり、1 回の `POST` で PDF/JSON/Markdown を同時に生成し、`export_job_id` は 1 個だけ発行される（§6.5 のレスポンスも `formats` 配列 + `download_urls` マップで返る）。そのため本テーブルは「1 行 = 1 ジョブ（複数フォーマットをまとめて内包）」を採用し、`format TEXT` の単一値カラムではなく `formats TEXT[]` + `object_keys JSONB` で複数フォーマット分の状態を 1 行に持たせる。フォーマットごとに行を分けると `export_job_id` と行が 1:N になり、§6.5 の「1 jobId → 1 レスポンス（複数 `download_urls`）」という API 形状と食い違うため採用しない。
+
+#### `status` に `'expired'` を含めない根拠
+
+api-spec.md §6.5 が定義する状態語彙は `queued` / `processing` / `completed` / `failed` の 4 種のみであり、ダウンロード URL の失効は `status` ではなく `expires_at`（本テーブル）と S3 presigned GET 自体の失効で表現される（`status='completed'` のまま `expires_at` を過ぎる）。ジョブそのものが「失効」して別状態に遷移する仕様は api-spec.md に存在しないため、`status` CHECK には `'expired'` を含めない。
+
+#### インデックス
+
+```sql
+-- カプセル単位のジョブ一覧・監査
+CREATE INDEX idx_export_jobs_capsule_id ON export_jobs (capsule_id);
+
+-- 要求者本人認可チェック（GET /capsules/{id}/export/{jobId}）・自分のジョブ一覧
+CREATE INDEX idx_export_jobs_requested_by ON export_jobs (requested_by);
+
+-- ワーカーのキュー取り出し（未完了ジョブのみ）
+CREATE INDEX idx_export_jobs_status_pending
+    ON export_jobs (status, requested_at)
+    WHERE status IN ('queued', 'processing');
+
+-- 生成物の有効期限切れクリーンアップバッチ
+CREATE INDEX idx_export_jobs_expires_at
+    ON export_jobs (expires_at)
+    WHERE expires_at IS NOT NULL;
+```
+
+#### CHECK 制約
+
+- `status IN ('queued', 'processing', 'completed', 'failed')`
+- `scope IN ('sealed_self_only', 'unsealed_all')`
+- `chk_export_jobs_formats_valid`: `formats` は空でなく、要素は `pdf`/`json`/`markdown` のみ:
+  ```sql
+  array_length(formats, 1) > 0
+  AND formats <@ ARRAY['pdf', 'json', 'markdown']::TEXT[]
+  ```
+- `chk_export_jobs_completion_consistency`: 完了時は成果物・完了日時が揃っていること:
+  ```sql
+  (status = 'completed' AND object_keys IS NOT NULL AND completed_at IS NOT NULL)
+  OR (status != 'completed')
+  ```
+- `chk_export_jobs_failure_consistency`: 失敗時はエラーメッセージ・完了日時が揃っていること:
+  ```sql
+  (status = 'failed' AND error_message IS NOT NULL AND completed_at IS NOT NULL)
+  OR (status != 'failed')
+  ```
+
+#### 外部キー
+
+- `capsule_id → capsules(id) ON DELETE CASCADE`（`delivery_addresses` / `storage_usage` / `unseal_events` / `email_deliveries` と同じ「カプセル付随ログ」方針を踏襲。§4.10）
+- `requested_by → users(id) ON DELETE RESTRICT`（`subscriptions.user_id` / `storage_purchases.user_id` と同じ方針。users は物理削除禁止のため実質発火しない）
 
 ---
 
@@ -929,10 +1048,10 @@ window_ends_at = timezone('Asia/Tokyo',
 
 ### 4.5.1 email_deliveries.unseal_event_id の整合性制約
 
-`email_deliveries` には開封イベントに由来するメール（`unseal_notice` / `record_delivery`）と、開封イベントとは独立して送信されるメール（`invite` / `bounce_warning` / `open_at_change`）の両方が混在する。`unseal_event_id` を NULL 許容に変更し、`email_type` との整合性を `chk_email_deliveries_unseal_event_consistency` CHECK 制約で強制する方針を採用した。これにより：
+`email_deliveries` には開封イベントに由来するメール（`unseal_notice` / `record_delivery`）と、開封イベントとは独立して送信されるメール（`invite` / `bounce_warning` / `open_at_change` / `trial_reminder`）の両方が混在する。`unseal_event_id` を NULL 許容に変更し、`email_type` との整合性を `chk_email_deliveries_unseal_event_consistency` CHECK 制約で強制する方針を採用した。これにより：
 
 - `unseal_notice` / `record_delivery` → `unseal_event_id IS NOT NULL`（開封イベント必須）
-- `invite` / `bounce_warning` / `open_at_change` → `unseal_event_id IS NULL`（開封と無関係）
+- `invite` / `bounce_warning` / `open_at_change` / `trial_reminder` → `unseal_event_id IS NULL`（開封と無関係。`trial_reminder` は `subscriptions.trial_end` 起点のトライアル終了バッチ由来。product-spec.md §6.5。2026-07-03 追記）
 
 という二律背反の制約を DB 層で確実に保証できる。外部キー `fk_email_deliveries_unseal_event` は `ON DELETE RESTRICT` のままで問題ない（`unseal_events` は INSERT only のため実際には発火しない）。
 
@@ -1003,9 +1122,9 @@ window_ends_at = timezone('Asia/Tokyo',
 
 | 方針 | 適用ケース | 具体例 |
 |------|-----------|--------|
-| `ON DELETE RESTRICT` | 参照先の削除が業務上不正となる場合。参照元が業務記録として独立した意味を持つ | `records.author_id → users`, `records.capsule_id → capsules`, `subscriptions.user_id → users`, `storage_purchases.user_id → users`, `email_deliveries.delivery_address_id → delivery_addresses`（監査担保）, `email_deliveries.record_id → records`（将来の records 削除許可時の配信ログ消失防止） |
+| `ON DELETE RESTRICT` | 参照先の削除が業務上不正となる場合。参照元が業務記録として独立した意味を持つ | `records.author_id → users`, `records.capsule_id → capsules`, `subscriptions.user_id → users`, `storage_purchases.user_id → users`, `email_deliveries.delivery_address_id → delivery_addresses`（監査担保）, `email_deliveries.record_id → records`（将来の records 削除許可時の配信ログ消失防止）, `export_jobs.requested_by → users`（2026-07-03 追記） |
 | `ON DELETE SET NULL` | 参照先が削除されても参照元レコードの存在価値が失われない場合 | `unseal_events.executed_by → users(id) ON DELETE SET NULL`（監査要件 + users 物理削除禁止のため users.id を採用。自動開封時は NULL）, `delivery_addresses.added_by → users` |
-| `ON DELETE CASCADE` | 親レコード削除時に子レコードも連動削除することが業務上自然な場合 | `delivery_addresses.capsule_id → capsules`（カプセル削除時に配信先も削除）, `storage_usage.capsule_id → capsules`, `unseal_events.capsule_id → capsules`, `email_deliveries.capsule_id → capsules` |
+| `ON DELETE CASCADE` | 親レコード削除時に子レコードも連動削除することが業務上自然な場合 | `delivery_addresses.capsule_id → capsules`（カプセル削除時に配信先も削除）, `storage_usage.capsule_id → capsules`, `unseal_events.capsule_id → capsules`, `email_deliveries.capsule_id → capsules`, `export_jobs.capsule_id → capsules`（2026-07-03 追記） |
 
 ---
 
@@ -1169,9 +1288,9 @@ $$;
 
 参加者2人・配信先5個の上限は現状アプリ層チェックのみ。課金プラン変更時の整合性を高めるため、`capsule_members` / `delivery_addresses` の INSERT トリガーで件数 CHECK を行う DDL レベルの二重防御を **Phase 2 で検討**する。
 
-### 6.12 invite/bounce_warning/open_at_change 系メールの独立運用
+### 6.12 invite/bounce_warning/open_at_change/trial_reminder 系メールの独立運用
 
-`email_deliveries` テーブルの `invite` / `bounce_warning` / `open_at_change` 系のメールは開封イベントと独立して送信される（`unseal_event_id = NULL`）。これらはカプセルの封印状態に関わらず任意のタイミングで発生し得るため、開封イベントへの強制紐付けは設計上不正確であった。CHECK 制約（`chk_email_deliveries_unseal_event_consistency`）によってこの分離が DB レベルで保証される。アプリ層でこれらのメールを INSERT する際は `unseal_event_id` を明示的に NULL とすること。
+`email_deliveries` テーブルの `invite` / `bounce_warning` / `open_at_change` / `trial_reminder`（2026-07-03 追記）系のメールは開封イベントと独立して送信される（`unseal_event_id = NULL`）。これらはカプセルの封印状態に関わらず任意のタイミングで発生し得るため、開封イベントへの強制紐付けは設計上不正確であった。CHECK 制約（`chk_email_deliveries_unseal_event_consistency`）によってこの分離が DB レベルで保証される。アプリ層でこれらのメールを INSERT する際は `unseal_event_id` を明示的に NULL とすること。`trial_reminder` は `subscriptions.trial_end` の3日前・1日前に発火するトライアル終了バッチ由来（product-spec.md §6.5）で、`capsule_id` はユーザーが所属するカプセルのいずれか（または通知設計次第で複数行）に紐付ける想定。具体的な紐付けルールの確定は実装スライスで行う。
 
 ### 6.13 Google purchaseToken ローテーション追跡
 
@@ -1188,3 +1307,5 @@ MVP では「冪等 UPSERT ＋ `latest_notification_at` 単調ガード ＋ UNIQ
 | バージョン | 日付 | 内容 |
 |---|---|---|
 | v1.0 | 2026-07-02 | IAP反映版。課金モデルを Stripe から Apple/Google IAP に全面再設計（`users.stripe_customer_id` 削除、`subscriptions`/`storage_purchases` のプラットフォーム識別子化、プラン同期フローの Apple ASSN V2 + Google RTDN 2系統化、消費型ストレージ購入の返金対応 `revoked_at` 新設）。billing 以外の8テーブルは既存設計を踏襲 |
+| v1.1 | 2026-07-03 | 仕様の穴3件を追記。(1) `capsule_members` に `invite_token_hash` / `invite_token_expires_at` を追加（招待トークンのハッシュ保存方式。§3.3・§1 ER図）。(2) `email_deliveries.email_type` CHECK に `'trial_reminder'` を追加（トライアル終了3日前/1日前通知。§3.11・§4.5.1・§6.12）。DDL/マイグレーションは未反映（仕様書のみの追記。実装は別スライス） |
+| v1.2 | 2026-07-03 | 着手前論点（PHASE1-BACKEND-KICKOFF-PROMPT.md §12）のエンジニア決定を反映。`export_jobs` テーブルを12テーブル目として新設（非同期エクスポートジョブ〔api-spec.md §6.4/§6.5〕の状態・要求者・生成物 S3 キー・失敗理由・有効期限を永続化。§1 ER図・§2 テーブル一覧・§3.12・§4.10）。DDL/マイグレーションは未反映（仕様書のみの追記。実装は B9 スライスで行う） |

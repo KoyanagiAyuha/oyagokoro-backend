@@ -235,15 +235,38 @@ Firebase Auth でサインイン成功後、アプリが最初に呼ぶ。ID Tok
 - **レスポンス**: `200`（更新後 `CapsuleRead`）。副作用として全 `active` 参加者宛の `open_at_change` 通知を非同期キューに登録。
 - **主なエラー**: `401` / `403 ERR_NOT_CAPSULE_MEMBER` / `404` / `409 ERR_CAPSULE_ALREADY_UNSEALED`（開封済み） / `422 ERR_OPEN_AT_IN_PAST`
 
-### 3.5 `POST /capsules/{capsuleId}/unseal` — 開封（不可逆）
+### 3.5 `POST /capsules/{capsuleId}/unseal/prepare` — 開封確認トークン発行（2026-07-03 追記）
+
+手動開封（§3.6）の第一段階。クライアントは開封確認モーダルを表示する直前に本 EP を呼び、サーバーが短命の `confirmation_token` を発行する。この EP 自体は開封を実行しない（副作用なし・冪等ではない毎回新規発行）。
+
+- **パスパラメータ**: `capsuleId`
+- **認可**: 対象カプセルの `active` 参加者（全員可）。凍結カプセル（`active` 0 人）は発行不可（`403 ERR_CAPSULE_FROZEN`）。
+- **リクエストボディ**: なし
+- **仕様**:
+  - サーバーは `capsule_id` と実行者（`user_id`）に紐付く不透明な `confirmation_token` を生成する。TTL 5 分・単回使用（§3.6 での検証成功時に失効させる）
+  - 開封済みカプセルへの発行は不可（`409 ERR_CAPSULE_ALREADY_UNSEALED`）
+  - 発行した `confirmation_token` はサーバー側で保持し、§3.6 の検証時にカプセルID・実行者・TTL・未使用であることを照合する
+- **レスポンス**: `201 Created`
+
+```json
+{
+  "confirmation_token": "opaque_confirmation_token_string",
+  "expires_at": "2046-03-14T22:05:00+09:00"
+}
+```
+
+- **主なエラー**: `401` / `403 ERR_NOT_CAPSULE_MEMBER` / `403 ERR_CAPSULE_FROZEN` / `404` / `409 ERR_CAPSULE_ALREADY_UNSEALED`（既に開封済み）
+
+### 3.6 `POST /capsules/{capsuleId}/unseal` — 開封（不可逆）
 
 任意タイミングでの手動開封（product-spec.md §3.4）。**不可逆操作のため二段階確認を確認トークンで表現**する。押下後、全参加者が即座に開封済み状態に遷移し、全配信先へ配信・通知処理が起動する。
 
-二段階確認フロー:
+二段階確認フロー（2026-07-03 更新: `confirmation_token` の発行元を §3.5 として明記した二段階フロー）:
 
-1. クライアントは第2段階モーダルで「開封」と入力させ、`confirmation_text` に載せて送信する。
-2. サーバーは `confirmation_text == "開封"` を検証（不一致は `400 ERR_UNSEAL_CONFIRMATION_MISMATCH`）。
-3. 冪等性のため、直前に `GET`/生成した `confirmation_token`（サーバー発行の短命トークン。カプセルと実行者に紐付く）を必須とし、二重押下を弾く。
+1. クライアントは開封確認モーダルを表示する前に `POST /capsules/{capsuleId}/unseal/prepare`（§3.5）を呼び、`confirmation_token` を取得する。
+2. クライアントは第2段階モーダルで「開封」と入力させ、`confirmation_text` と、手順1で取得した `confirmation_token` を合わせて本 EP に送信する。
+3. サーバーは `confirmation_text == "開封"` を検証（不一致は `400 ERR_UNSEAL_CONFIRMATION_MISMATCH`）。
+4. サーバーは `confirmation_token` を検証する（対象カプセル・実行者との一致、TTL 内、未使用であること）。不正・存在しない・使用済みは `400 ERR_CONFIRMATION_TOKEN_INVALID`、TTL（5分）超過は `400 ERR_CONFIRMATION_TOKEN_EXPIRED`。検証成功時は同一トランザクションでトークンを失効させ（単回使用）、二重押下を弾く。
 
 - **パスパラメータ**: `capsuleId`
 - **認可**: 対象カプセルの `active` 参加者（全員可）。凍結カプセル（`active` 0 人）は API 経由の手動開封不可（`403 ERR_CAPSULE_FROZEN`。開封日到来の自動開封のみ発火）。
@@ -252,7 +275,7 @@ Firebase Auth でサインイン成功後、アプリが最初に呼ぶ。ID Tok
 | 項目 | 型 | 必須 | バリデーション | 説明 |
 |---|---|---|---|---|
 | `confirmation_text` | string | 必須 | 完全一致 `"開封"` | 第2段階の入力確認 |
-| `confirmation_token` | string | 必須 | サーバー発行値 | 冪等・二重押下防止 |
+| `confirmation_token` | string | 必須 | サーバー発行値（§3.5 で取得） | 冪等・二重押下防止 |
 
 - **レスポンス**: `200`
 
@@ -267,7 +290,7 @@ Firebase Auth でサインイン成功後、アプリが最初に呼ぶ。ID Tok
 ```
 
 - 副作用: `unseal_events` に `trigger_type='manual'`・`executed_by=<自分>` を INSERT（INSERT only）。`capsules.unsealed_at`/`unseal_trigger='manual'` を更新。全配信先への `record_delivery` と全参加者への `unseal_notice` を配信ジョブへ登録（§9）。
-- **主なエラー**: `401` / `403 ERR_NOT_CAPSULE_MEMBER` / `403 ERR_CAPSULE_FROZEN` / `404` / `409 ERR_CAPSULE_ALREADY_UNSEALED`（既に開封済み） / `400 ERR_UNSEAL_CONFIRMATION_MISMATCH`
+- **主なエラー**: `401` / `403 ERR_NOT_CAPSULE_MEMBER` / `403 ERR_CAPSULE_FROZEN` / `404` / `409 ERR_CAPSULE_ALREADY_UNSEALED`（既に開封済み） / `400 ERR_UNSEAL_CONFIRMATION_MISMATCH` / `400 ERR_CONFIRMATION_TOKEN_INVALID` / `400 ERR_CONFIRMATION_TOKEN_EXPIRED`
 
 ---
 
@@ -310,7 +333,24 @@ Firebase Auth でサインイン成功後、アプリが最初に呼ぶ。ID Tok
 | `email` | string(email) | 必須 | RFC 5321, max 320 | 招待先。保存時 `LOWER()` 正規化 |
 
 - **重複防止**: `(capsule_id, LOWER(invited_email))` UNIQUE。既存招待/参加と重複時は `409 ERR_MEMBER_ALREADY_INVITED`。
-- **レスポンス**: `201`（`MemberRead`。`status='invited'`）
+- **招待トークン発行**（2026-07-03 追記）: サーバーは不透明な生トークン（十分なエントロピーを持つランダム文字列）を一度だけ生成する。生トークンは (1) 本エンドポイントのレスポンス `invitation_token` フィールド、(2) 招待メール本文の受諾リンク、の2箇所にのみ含め、それ以降は取得不可能とする。DB には SHA-256 等でハッシュ化した値のみを `capsule_members.invite_token_hash` として保存し、生トークンは保存しない（data-model.md §3.3）。有効期限は `invite_token_expires_at`（data-model.md §3.3）で管理する。
+- **レスポンス**: `201`（`MemberRead` + 一度限りの招待トークン）
+
+```json
+{
+  "member_id": "mem_UUID",
+  "capsule_id": "cap_UUID",
+  "user_id": null,
+  "invited_email": "father@example.com",
+  "status": "invited",
+  "display_name": null,
+  "invited_at": "2026-08-01T09:00:00+09:00",
+  "joined_at": null,
+  "deleted_at": null,
+  "invitation_token": "opaque_invite_token_string"
+}
+```
+
 - **主なエラー**: `401` / `403 ERR_NOT_CAPSULE_MEMBER` / `404` / `409 ERR_MEMBER_LIMIT_REACHED`（上限 2 人） / `409 ERR_MEMBER_ALREADY_INVITED` / `409 ERR_CAPSULE_ALREADY_UNSEALED`（開封後招待不可） / `422`（不正メアド）
 
 ### 4.3 `DELETE /capsules/{capsuleId}/members/{memberId}` — 参加者削除 / 退出
@@ -327,12 +367,13 @@ Firebase Auth でサインイン成功後、アプリが最初に呼ぶ。ID Tok
 
 招待メール内リンクの `token` で招待を受諾し、`active` 参加者になる。**アカウント未登録でも参加可**（product-spec.md §3.3 の参加者状態遷移を参照）だが、当 API 呼び出し時点では Firebase サインイン + `POST /auth/register` 済みであることを前提とする（アプリは招待リンク → サインイン → 本 API の順で処理）。
 
-- **パスパラメータ**: `token`（招待トークン。メール記載の不透明値）
+- **パスパラメータ**: `token`（招待トークン。メール記載の不透明値。生トークンはDBに保存されない。サーバーは受信した `token` を SHA-256 等でハッシュ化し、`capsule_members.invite_token_hash` と突合して照合する — data-model.md §3.3。2026-07-03 追記）
 - **認可**: 認証済みユーザー（招待トークンが認可の主体。トークンの `invited_email` とサインイン `email` の一致を検証。不一致は `403 ERR_INVITATION_EMAIL_MISMATCH`）。
 - **リクエストボディ**: なし
-- **副作用**: 対象 `capsule_members` 行を `status='active'`・`user_id=<自分>`・`joined_at=now()` に更新。開封済みカプセルは受諾不可（product-spec.md §5.6）。
+- **トークン検証**（2026-07-03 追記）: ハッシュ不一致（該当行なし）は `404 ERR_INVITATION_NOT_FOUND`（存在秘匿）。`invite_token_expires_at` を超過した期限切れトークンも同じく `404 ERR_INVITATION_NOT_FOUND` として扱う（無効トークンと失効トークンを区別せず存在秘匿を優先し、招待トークン推測攻撃への情報漏洩を避ける）。
+- **副作用**: 対象 `capsule_members` 行を `status='active'`・`user_id=<自分>`・`joined_at=now()` に更新し、`invite_token_hash` / `invite_token_expires_at` を `NULL` にクリアする（data-model.md §3.3）。開封済みカプセルは受諾不可（product-spec.md §5.6）。
 - **レスポンス**: `200`（`MemberRead`。`status='active'`）
-- **主なエラー**: `401` / `403 ERR_INVITATION_EMAIL_MISMATCH` / `404 ERR_INVITATION_NOT_FOUND`（無効・失効トークン） / `409 ERR_INVITATION_ALREADY_ACCEPTED` / `409 ERR_CAPSULE_ALREADY_UNSEALED`
+- **主なエラー**: `401` / `403 ERR_INVITATION_EMAIL_MISMATCH` / `404 ERR_INVITATION_NOT_FOUND`（無効・失効・ハッシュ不一致トークン） / `409 ERR_INVITATION_ALREADY_ACCEPTED` / `409 ERR_CAPSULE_ALREADY_UNSEALED`
 
 ---
 
@@ -553,6 +594,7 @@ Firebase Auth でサインイン成功後、アプリが最初に呼ぶ。ID Tok
 
 - `scope` は `sealed_self_only`（封印中・自分の記録のみ）/ `unsealed_all`（開封後・全記録）。生成物とジョブは要求者本人に紐付き、封印中エクスポートは本人以外に開示しない。
 - **主なエラー**: `401` / `403 ERR_NOT_CAPSULE_MEMBER` / `404 ERR_CAPSULE_NOT_FOUND` / `422`（未対応 format 指定 → `ERR_EXPORT_FORMAT_INVALID`）
+- ジョブ状態は `export_jobs` テーブル（data-model.md §3.12）に永続化される。サーバー/ワーカーの再起動をまたいでもジョブは失われない。レスポンスの `export_job_id` は `export_jobs.id` に対応する（2026-07-03 追記）。
 
 ### 6.5 `GET /capsules/{capsuleId}/export/{jobId}` — エクスポート結果取得（ジョブ状態 / ダウンロード URL）
 
@@ -581,9 +623,10 @@ Firebase Auth でサインイン成功後、アプリが最初に呼ぶ。ID Tok
 
 - `status`: `queued` / `processing` / `completed` / `failed`。`completed` 以外では `download_urls` は `null`。`failed` 時は `error_message` を含める（再実行は `§6.4` を再度呼ぶ）。
 - `download_urls` の各 URL は短命の S3 presigned GET（`expires_at` まで）。PDF は PDF/A-1b 準拠（product-spec.md §8.1）。
+- 本エンドポイントが返す `status` / `error_message` / `expires_at` は `export_jobs`（data-model.md §3.12）の同名カラムにそのまま対応する。`download_urls` は `export_jobs.object_keys`（S3 オブジェクトキー）から presigned GET を都度発行して返す（2026-07-03 追記）。
 - **主なエラー**: `401` / `403 ERR_NOT_CAPSULE_MEMBER` / `404 ERR_EXPORT_JOB_NOT_FOUND`
 
-> エクスポートジョブ状態は非同期ワーカー（§9.2 の内部ジョブと同系）で処理する。ジョブ管理用ストア（生成物 S3 キー・要求者・scope・有効期限）の永続化方式は実装詳細（MVP では専用 DB テーブルを必須とせず、短命ジョブとして扱ってよい）。
+> エクスポートジョブ状態は非同期ワーカー（§9.2 の内部ジョブと同系。起動トリガーは Vercel Cron → `POST /internal/jobs/*`）で処理し、`export_jobs` テーブル（data-model.md §3.12）に永続化する（新設決定・2026-07-03）。ジョブ管理用ストア（生成物 S3 キー・要求者・scope・有効期限）はこのテーブルで一元管理し、サーバー/ワーカーの再起動をまたいでもジョブ状態は失われない。
 
 ---
 
@@ -840,6 +883,8 @@ S3 直 PUT 完了後に呼ぶ。サーバーは S3 の実オブジェクト（�
 | `ERR_CAPSULE_FROZEN` | 403 | 凍結カプセル（`active` 0 人）への手動開封・投稿 |
 | `ERR_OPEN_AT_IN_PAST` | 422 | 開封日に過去日時を指定 |
 | `ERR_UNSEAL_CONFIRMATION_MISMATCH` | 400 | 開封の確認文字列（「開封」）不一致 |
+| `ERR_CONFIRMATION_TOKEN_INVALID` | 400 | `confirmation_token` が不正・存在しない・使用済み（§3.5/§3.6。2026-07-03 追記） |
+| `ERR_CONFIRMATION_TOKEN_EXPIRED` | 400 | `confirmation_token` の有効期限（TTL 5 分）切れ（§3.5/§3.6。2026-07-03 追記） |
 | `ERR_MEMBER_NOT_FOUND` | 404 | 参加者レコード未存在 |
 | `ERR_MEMBER_LIMIT_REACHED` | 409 | 参加者上限 2 人超過（★G） |
 | `ERR_MEMBER_ALREADY_INVITED` | 409 | 同一メアドで既に招待/参加済み（LOWER 重複） |
@@ -881,6 +926,7 @@ S3 直 PUT 完了後に呼ぶ。サーバーは S3 の実オブジェクト（�
 | 7 | カプセル | GET `/capsules` | 自分の参加一覧 |
 | 8 | カプセル | GET `/capsules/{id}` | 詳細 |
 | 9 | カプセル | PATCH `/capsules/{id}/open-date` | 開封日変更（全員可・通知） |
+| 9a | カプセル | POST `/capsules/{id}/unseal/prepare` | 開封確認トークン発行（TTL 5分・単回使用。2026-07-03 追記） |
 | 10 | カプセル | POST `/capsules/{id}/unseal` | 開封（不可逆・確認トークン） |
 | 11 | 参加者 | GET `/capsules/{id}/members` | 参加者一覧 |
 | 12 | 参加者 | POST `/capsules/{id}/members` | 招待（メアド） |
