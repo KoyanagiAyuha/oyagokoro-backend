@@ -21,6 +21,12 @@ build/
 .venv/
 venv/
 
+# Claude Code（ローカルのツール状態・設定・ダッシュボード）
+.claude/
+
+# macOS
+.DS_Store
+
 # uv はlockをコミットするので除外しない
 
 # テスト・lint
