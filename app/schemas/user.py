@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class UserRead(BaseModel):
@@ -40,3 +40,23 @@ class UserTermsAgreeRequest(BaseModel):
     """POST /api/v1/users/me/terms-agreement のリクエストボディ"""
 
     terms_version: str = Field(min_length=1, max_length=32)
+
+
+class UserUpdateRequest(BaseModel):
+    """PATCH /api/v1/users/me のリクエストボディ。
+
+    すべて任意・指定された項目のみ更新する部分更新（exclude_unset で判定）。
+    display_name は null 許容（クリア用途）だが、locale/timezone は DB が
+    NOT NULL のため null 指定は 422 で拒否する（未指定＝キー省略とは区別）。
+    """
+
+    display_name: str | None = Field(default=None, max_length=120)
+    locale: str | None = Field(default=None, max_length=10)
+    timezone: str | None = Field(default=None, max_length=64)
+
+    @field_validator("locale", "timezone")
+    @classmethod
+    def _reject_explicit_null(cls, v: str | None) -> str | None:
+        if v is None:
+            raise ValueError("null is not allowed; omit the field to leave it unchanged")
+        return v
