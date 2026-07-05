@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.database import get_session
 from app.models.user import User
-from app.schemas import UserRead, UserTermsAgreeRequest
+from app.schemas import UserRead, UserTermsAgreeRequest, UserUpdateRequest
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -21,6 +21,33 @@ async def get_me(
     current_user: User = Depends(get_current_user),
 ) -> User:
     """認証済みユーザーの情報を返す。terms_agreed_at=NULL のままでも 200 で返す。"""
+    return current_user
+
+
+@router.patch(
+    "/me",
+    response_model=UserRead,
+    summary="プロフィール更新",
+)
+async def update_me(
+    body: UserUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> User:
+    """指定されたフィールドのみ部分更新する（exclude_unset）。
+
+    未指定フィールドは変更しない。display_name/locale/timezone のいずれも
+    指定が無い場合は UPDATE を発行せず現在のユーザーをそのまま返す。
+    updated_at もアプリ層で明示更新（モデルに UPDATE トリガ未定義のため）。
+    """
+    changed_fields = body.model_dump(exclude_unset=True)
+    if not changed_fields:
+        return current_user
+
+    stmt = update(User).where(User.id == current_user.id).values(**changed_fields, updated_at=func.now())
+    await session.execute(stmt)
+    await session.commit()
+    await session.refresh(current_user)
     return current_user
 
 
